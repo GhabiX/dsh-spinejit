@@ -1,0 +1,151 @@
+import type { Context } from "@deepseek-ai/cordis";
+import type { Agent } from "@deepseek-ai/dsh-agent";
+import { isAgentLoopRequest } from "@deepseek-ai/dsh-llm";
+import type {} from "@deepseek-ai/dsh-system-prompt";
+import type { ToolDefinition } from "@deepseek-ai/dsh-tools";
+import { isSpineToolName, loadSpineConfigToml, SpawnChildren } from "@spinejit/spine-sdk/host";
+import { createNodeSpineRuntime, type SpineToolSpec } from "@spinejit/spine-sdk/node";
+
+import { SPINE_FEATURES, SpineAgent } from "./agent.js";
+import { userAnchorsProjection } from "./anchors.js";
+import { TreeDisplay, treeProjection } from "./display.js";
+import { arrivalMessage, SpineDshError } from "./events.js";
+import { withoutReasoningProjection } from "./reasoning.js";
+import { executeChild, recoverChildren, spineSubagentProvider, type SpineWorld } from "./spawn.js";
+import { registerTreeView } from "./tui.js";
+
+/** The Cordis plugin DeepSeek Harness loads, by package name, from a bundle. */
+export const name = "spinejit";
+export const inject = ["agents", "llm", "sessionPersistence", "sessions", "subagents", "systemPrompt", "tools"];
+
+export function apply(ctx: Context): void {
+  const configToml = loadSpineConfigToml();
+  const catalog = createNodeSpineRuntime({ thread: "dsh-tool-catalog", features: SPINE_FEATURES, configToml });
+  let tools: SpineToolSpec[];
+  let prompt: string;
+  try {
+    tools = catalog.toolCatalog();
+    prompt = catalog.extendSystemPrompt("").trim();
+  } finally {
+    catalog.dispose();
+  }
+
+  const agents = new Map<string, SpineAgent>();
+  const children = new Map<string, SpawnChildren>();
+  const world: SpineWorld = { ctx, agents, children, idle: new Map(), starting: new Map() };
+  ctx.sessions.registerMessageProjection(withoutReasoningProjection);
+  ctx.sessions.registerMessageProjection(userAnchorsProjection);
+  ctx.subagents.registerProvider(spineSubagentProvider(world.starting));
+  ctx.systemPrompt.section({ name: "spinejit", order: ctx.systemPrompt.getSectionOrder("TOOLS_SDK"), text: prompt });
+  for (const tool of tools) ctx.tools.register(spineTool(tool, agents));
+
+  // The tree each agent shows: a session projection for clients when the host
+  // has the registry, and status rows when dsh-tui is composed.
+  const display = new TreeDisplay();
+  ctx.inject(["sessionProjections"] as never, ((projectionCtx: Context) => {
+    (projectionCtx as unknown as { sessionProjections: { register(definition: unknown): unknown } })
+      .sessionProjections.register(treeProjection);
+  }) as never);
+  registerTreeView(ctx, display);
+
+  ctx.on("session/event", (session, event) => {
+    agents.get(session.id)?.accept(event);
+  });
+  ctx.on("agent/created", async ({ agent }) => {
+    // An arrival enters only the session that bore it, once, while its birth is
+    // open. The inbox is durable, so one still pending there, even from before
+    // a restart, has already been handed over.
+    const own = new SpawnChildren((arrival, wake) => {
+      const producer = arrival.producer.join(".");
+      if (!agents.get(agent.id)?.openBirths().some((birth) => birth.producer.join(".") === producer)) return;
+      if ([...agent.inbox.nextStep, ...agent.inbox.nextTurn].some((message) =>
+        message.source.kind === "spine-arrival" && message.source.arrival.producer.join(".") === producer)) return;
+      if (wake) agent.steer(arrivalMessage(arrival));
+      else agent.inject(arrivalMessage(arrival));
+    });
+    display.open(agent.session);
+    const spine = await SpineAgent.create(agent, configToml, async (births, prefixEnd) => {
+      const started: Promise<void>[] = [];
+      own.launch(births, (birth, peers, signal) => {
+        let start!: () => void;
+        started.push(new Promise((resolve) => { start = resolve; }));
+        return executeChild(world, agent, birth, peers, prefixEnd, signal, (arrival) => own.arrive(arrival), start);
+      });
+      await Promise.all(started);
+    }, (projection) => display.update(agent.session, projection));
+    agents.set(agent.id, spine);
+    children.set(agent.id, own);
+    // The recovered tree, recorded where the log has not, once the record's own event reaches the agent.
+    if (spine.projection !== null) display.update(agent.session, spine.projection);
+    await recoverChildren(world, agent, spine.openBirths(), own);
+    agent.ctx.effect(() => async () => {
+      // Its children stop and deliver nothing; a resumed session recovers them.
+      own.dispose();
+      // The turn in flight keeps its Spine state until it stops. An open
+      // sampling needs no settling here: its stretch is in the log.
+      await agent.whenIdle();
+      agents.delete(agent.id);
+      children.delete(agent.id);
+      display.close(agent.id);
+      spine.dispose();
+    });
+  });
+  ctx.on("agent/status", ({ agent, status }) => {
+    const spine = agents.get(agent.id);
+    const own = children.get(agent.id);
+    if (status !== "idle" || spine === undefined || own === undefined) return;
+    // A stopped agent stops its children; their arrivals do not wake it.
+    const aborted = lastTurnAborted(agent);
+    if (aborted) own.stop();
+    own.settle(spine.openBirths(), aborted);
+    world.idle.get(agent.id)?.();
+  });
+  ctx.on("agent/pre-step", async (payload, next) => {
+    const spine = agents.get(payload.agent.id);
+    if (spine === undefined) return next();
+    await spine.settle();
+    return next();
+  }, { prepend: true });
+  ctx.on("agent/request", async (payload, next) => {
+    await agents.get(payload.agent.id)?.enterStep(payload.turn, payload.step);
+    return next();
+  }, { prepend: true });
+  ctx.on("llm/stream", (request, next) => {
+    const spine = isAgentLoopRequest(request) && request.sessionId !== undefined ? agents.get(request.sessionId) : undefined;
+    if (spine === undefined) return next();
+    return (async function* () {
+      await spine.beginSampling();
+      yield* next();
+    })();
+  }, { prepend: true });
+}
+
+function lastTurnAborted(agent: Agent): boolean {
+  const events = agent.session.snapshotEvents();
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === "turn/end") return event.data.reason.kind === "aborted";
+  }
+  return false;
+}
+
+/** A Spine tool only admits its call; its sampling stages and commits it when it settles, before the model reads the result. */
+function spineTool(spec: SpineToolSpec, agents: ReadonlyMap<string, SpineAgent>): ToolDefinition {
+  const name = `spine_${spec.id}`;
+  if (!isSpineToolName(name)) throw new SpineDshError(`unknown Spine tool ${name}`);
+  return {
+    name,
+    description: spec.description,
+    parameters: spec.parameters as ToolDefinition["parameters"],
+    output: {
+      schema: { type: "object", properties: { result: { type: "string" } }, required: ["result"] },
+      render: (_args, value) => [{ type: "text", text: (value as { result: string }).result }],
+    },
+    async execute(args, exec) {
+      if (exec.parent !== undefined) throw new SpineDshError(`${name} must be called by the model directly, not from code`);
+      const spine = exec.agent === undefined ? undefined : agents.get(exec.agent.id);
+      if (spine === undefined) throw new SpineDshError(`${name} was called outside a Spine agent`);
+      return { result: spine.admit(name, args as Record<string, unknown>) };
+    },
+  };
+}
