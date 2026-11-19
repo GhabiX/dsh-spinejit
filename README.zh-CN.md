@@ -4,6 +4,8 @@
 
 [English](README.md) | 简体中文
 
+> **官方发布源说明：** [`@spinejit/dsh-spinejit`](https://www.npmjs.com/package/@spinejit/dsh-spinejit) 的上游主仓库与 npm 官方发布源位于 [`GhabiX/spine-plugin/packages/dsh`](https://github.com/GhabiX/spine-plugin/tree/main/packages/dsh)；本独立镜像仓同步附带预构建 `dist/` 产物以兼容 GitHub 源码直装，日常推荐通过 npm 包名（`dsh plugin --profile web add @spinejit/dsh-spinejit`）安装。
+
 **让智能体的上下文与任务树自然对齐。**
 
 长程任务天然是一棵嵌套的子任务树，但智能体的默认上下文却是一条单向堆积的扁平日志。**Spine** 将 DeepSeek Harness（DSH）的执行过程统一纳入持久化工作树（**`SpineTree`**）管理：智能体在推理时显式开启、切换和闭合本地子任务（`Open`、`Close`、`Next`），并在需要并行分治时委派子树（`Spawn`）；每次调用模型前，运行时根据 `SpineTree` 即时编译出最小有效上下文——完整保留当前活跃步骤，将已完成的子任务自动折叠为其返回结论，同时保持前序上下文逐字节不变以持续命中前缀缓存。

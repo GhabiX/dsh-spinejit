@@ -4,6 +4,8 @@
 
 English | [简体中文](README.zh-CN.md)
 
+> **Canonical source & npm releases:** Official development and npm Trusted Publishing for [`@spinejit/dsh-spinejit`](https://www.npmjs.com/package/@spinejit/dsh-spinejit) live in [`GhabiX/spine-plugin/packages/dsh`](https://github.com/GhabiX/spine-plugin/tree/main/packages/dsh); this standalone mirror includes prebuilt `dist/` artifacts for GitHub source consumers, and installing via npm (`dsh plugin --profile web add @spinejit/dsh-spinejit`) is recommended.
+
 **Your agent's context, shaped like its task.**
 
 Long-horizon tasks unfold as nested subtasks, yet an agent's context is a flat linear stream where finished explorations and dead ends pile up alongside unfinished work. **Spine** places DeepSeek Harness (DSH) execution under a persistent work tree (**`SpineTree`**, acting as the structural spine of long-horizon work): the agent opens subtasks with explicit goals, switches or closes them locally (`Open`, `Close`, `Next`), and delegates parallel subtrees when needed (`Spawn`). Before each model call, Spine compiles `SpineTree` into minimal effective context—keeping active work in full while folding finished subtasks into their returned conclusions, without breaking prefix caching.
