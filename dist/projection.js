@@ -1,3 +1,5 @@
+import { deriveEventMessage } from "@deepseek-ai/dsh-session";
+import { estimateMessage } from "@deepseek-ai/dsh-token-meter/estimate";
 import { spineBirthText, spineMemoryText, spineNodeText, } from "@spinejit/spine-sdk/host";
 import { emptySlot, SpineDshError, spineMessage } from "./events.js";
 /** The plan's items. A reply stays its original assistant event. */
@@ -40,8 +42,9 @@ function planItem(cell, seqOf) {
  * order. Between two anchors, the surface is split at host nodes into runs;
  * the plan's spine items between those anchors belong to the last run and
  * every other run must show nothing. A run already showing its items is left
- * alone. Otherwise a run with no items becomes one empty slot, and a run with
- * k items gives its last k-1 nodes one item each and the first item the rest.
+ * alone. Otherwise each item occupies one node, and unused nodes become
+ * invisible slots. Keeping the run's positions lets a later fold put more
+ * items in the same gap between anchors without inserting into the surface.
  * Items after the last anchor with no run to hold them are appended.
  */
 export function surfaceEdits(surface, plan) {
@@ -95,28 +98,40 @@ function runEdits(run, texts) {
     const visible = run.filter((node) => node.role !== "spine" || node.text !== null);
     if (visible.length === texts.length && visible.every((node, index) => shows(node, texts[index])))
         return [];
-    if (texts.length === 0)
-        return [replace(run, null)];
     if (run.length < texts.length) {
         throw new SpineDshError(`${texts.length} Spine items do not fit ${run.length} surface nodes`);
     }
-    const head = run.length - texts.length + 1;
-    const parts = [run.slice(0, head), ...run.slice(head).map((node) => [node])];
-    return parts.flatMap((part, index) => part.length === 1 && shows(part[0], texts[index]) ? [] : [replace(part, texts[index])]);
+    // Reuse the visible prefix, including empty slots before it, whenever there
+    // is still room for the rest. The fill that follows keeps every position.
+    let start = 0;
+    let matched = 0;
+    for (let i = 0; matched < texts.length && run.length - i >= texts.length - matched; i += 1) {
+        const node = run[i];
+        if (shows(node, null))
+            continue;
+        if (!shows(node, texts[matched]))
+            break;
+        start = i + 1;
+        matched += 1;
+    }
+    return run.slice(start).flatMap((node, index) => {
+        const text = texts[matched + index] ?? null;
+        return shows(node, text) ? [] : [replace(node, text)];
+    });
 }
 function shows(node, text) {
     return node.role === "spine" && node.text === text;
 }
-function replace(nodes, text) {
+function replace(node, text) {
     return {
         type: "replace",
-        startSeq: nodes[0].seq,
-        endSeq: nodes.at(-1).seq,
-        shadowed: nodes.map((node) => node.seq),
+        startSeq: node.seq,
+        endSeq: node.seq,
+        shadowed: [node.seq],
         text,
     };
 }
-/** Log the edits in the open step. A replaced range shows one slot or one item. */
+/** Log the edits in the open step. Each replacement preserves its position. */
 export function applySurfaceEdits(session, edits, turn, step) {
     for (const edit of edits) {
         if (edit.type === "append") {
@@ -127,6 +142,20 @@ export function applySurfaceEdits(session, edits, turn, step) {
             surfaceOp: { op: "replace", startSeq: edit.startSeq, endSeq: edit.endSeq },
             sourceEventSeqs: edit.shadowed,
         };
+        // The native meter subtracts the old message's price only when the
+        // replacement immediately follows its shadow-price record.
+        const shadowedTokenCount = edit.shadowed.reduce((tokens, seq) => {
+            const event = session.eventAt(seq);
+            if (event === undefined)
+                throw new SpineDshError(`session event ${seq} was never seen`);
+            const message = deriveEventMessage(event);
+            return tokens + (message === null ? 0 : estimateMessage(message));
+        }, 0);
+        session.append("compaction/prune", {
+            shadowedRange: { start: edit.startSeq, end: edit.endSeq },
+            shadowedSeqs: edit.shadowed,
+            shadowedTokenCount,
+        });
         if (edit.text === null) {
             session.append("developer/message", { turn, step, message: emptySlot() }, placement);
         }

@@ -1,4 +1,4 @@
-import type { Session, SessionSeq } from "@deepseek-ai/dsh-session";
+import { type Session, type SessionSeq } from "@deepseek-ai/dsh-session";
 import type { EpochOrdinalId } from "@spinejit/spine-sdk";
 import { type PublishedContext } from "@spinejit/spine-sdk/host";
 import { type SurfaceRole } from "./events.js";
@@ -44,11 +44,12 @@ export declare function planItems(context: PublishedContext, seqOf: (id: EpochOr
  * order. Between two anchors, the surface is split at host nodes into runs;
  * the plan's spine items between those anchors belong to the last run and
  * every other run must show nothing. A run already showing its items is left
- * alone. Otherwise a run with no items becomes one empty slot, and a run with
- * k items gives its last k-1 nodes one item each and the first item the rest.
+ * alone. Otherwise each item occupies one node, and unused nodes become
+ * invisible slots. Keeping the run's positions lets a later fold put more
+ * items in the same gap between anchors without inserting into the surface.
  * Items after the last anchor with no run to hold them are appended.
  */
 export declare function surfaceEdits(surface: readonly SurfaceNode[], plan: readonly PlanItem[]): SurfaceEdit[];
-/** Log the edits in the open step. A replaced range shows one slot or one item. */
+/** Log the edits in the open step. Each replacement preserves its position. */
 export declare function applySurfaceEdits(session: Session, edits: readonly SurfaceEdit[], turn: number, step: number): void;
 //# sourceMappingURL=projection.d.ts.map

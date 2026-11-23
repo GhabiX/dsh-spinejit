@@ -5,10 +5,10 @@ import { type SpawnBirth, type SpineToolName } from "@spinejit/spine-sdk/host";
 export declare const SPINE_FEATURES: FeatureFlag[];
 /**
  * Hands over the births a live commit made and where their sampling began in
- * the log; resolves once their children are established, so the step that
- * follows a Spawn starts with its children already the agent's subagents.
+ * the log. Resolves once the children are started, or receive non-waking abort
+ * arrivals if the user stopped the turn while the Spawn was still queued.
  */
-export type BirthHandler = (births: readonly SpawnBirth[], prefixEnd: number) => Promise<void>;
+export type BirthHandler = (births: readonly SpawnBirth[], prefixEnd: number, stopped: boolean) => Promise<void>;
 /** Hears each projection the agent publishes or commits live; the recovered one is `projection` once `create` returns. */
 export type ProjectionHandler = (projection: SpineProjection) => void;
 /**

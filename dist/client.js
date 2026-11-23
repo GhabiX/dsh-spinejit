@@ -25,8 +25,7 @@ var client_exports = {};
 __export(client_exports, {
   SpineDock: () => SpineDock,
   apply: () => apply,
-  inject: () => inject,
-  userAnchorRule: () => userAnchorRule
+  inject: () => inject
 });
 module.exports = __toCommonJS(client_exports);
 var import_jsx_runtime = require("react/jsx-runtime");
@@ -286,9 +285,23 @@ function showsTree(tree) {
 }
 
 // src/client.ts
+var emptySpineContextDefinition = {
+  kind: "spinejit.empty-context",
+  target: "chat",
+  match: {
+    "developer/message"(event) {
+      const { message } = event.data;
+      const kind = message.source.kind;
+      return kind === "spine" && message.content.length === 0 ? { id: String(event.seq), role: "start", exclusive: true } : null;
+    }
+  },
+  start: () => null,
+  update: () => null,
+  buildViewNode: () => null
+};
 var inject = ["slots", "uiConversation"];
 function apply(ctx) {
-  ctx.effect(() => ctx.uiConversation.userText.register(userAnchorRule), "spinejit: user anchor");
+  ctx.effect(() => ctx.uiConversation.events.register(emptySpineContextDefinition), "spinejit: hide empty context");
   ctx.slots.inject("conversation.input.dock", () => ctx.slots.register({
     name: "conversation.input.dock",
     // After the official entries: todo 0, goal 10, activity 15, queue 20.
@@ -297,18 +310,6 @@ function apply(ctx) {
     registrant: "@spinejit/dsh-spinejit"
   }, SpineDock));
 }
-var USER_ANCHOR = /^\[U\d+\]\n/;
-var userAnchorRule = {
-  id: "spinejit.user-anchor",
-  // Before the official whitespace rules (1000, 1010); only same-start candidates compete.
-  order: 900,
-  match(text, from) {
-    if (from !== 0) return void 0;
-    const anchor = USER_ANCHOR.exec(text);
-    if (anchor === null) return void 0;
-    return { id: "text", start: 0, end: anchor[0].length, data: { text: anchor[0], display: "" } };
-  }
-};
 var BLOCK = {
   boxSizing: "border-box",
   width: "100%",

@@ -1,3 +1,4 @@
+import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import { TREE_PROJECTION, type SpineTree } from "./tree.js";
 /** The dock seat's props the entry reads. */
 export interface SpineDockProps {
@@ -13,32 +14,31 @@ interface Slots {
         registrant: string;
     }, component: (props: SpineDockProps) => unknown): unknown;
 }
-/** The part of the Conversation plugin's user-text registry the entry uses. */
-interface UserTextRegistry {
-    register(rule: typeof userAnchorRule): () => void;
-}
+/** Hide only Spine's empty replay markers and reserved slots, not other events. */
+declare const emptySpineContextDefinition: {
+    kind: string;
+    target: string;
+    match: {
+        "developer/message"(event: SessionEvent<"developer/message">): {
+            id: string;
+            role: "start";
+            exclusive: true;
+        } | null;
+    };
+    start: () => null;
+    update: () => null;
+    buildViewNode: () => null;
+};
 export declare const inject: string[];
 export declare function apply(ctx: {
     slots: Slots;
     uiConversation: {
-        userText: UserTextRegistry;
+        events: {
+            register(definition: typeof emptySpineContextDefinition): () => void;
+        };
     };
     effect(execute: () => () => void, label?: string): unknown;
 }): void;
-/** Hides the `[U<n>]` line a user message starts with; the Conversation plugin applies it to every user bubble. */
-export declare const userAnchorRule: {
-    id: string;
-    order: number;
-    match(text: string, from: number): {
-        id: "text";
-        start: number;
-        end: number;
-        data: {
-            text: string;
-            display: string;
-        };
-    } | undefined;
-};
 /** Hook-free but for `useProjection`, so the dock can also call it as a plain function. */
 export declare function SpineDock({ useProjection }: SpineDockProps): unknown;
 export {};

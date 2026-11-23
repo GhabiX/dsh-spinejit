@@ -12,8 +12,11 @@ export interface SpineWorld {
     ctx: Context;
     agents: ReadonlyMap<string, SpineAgent>;
     children: ReadonlyMap<string, SpawnChildren>;
-    /** What to check each time a Spawn child agent goes idle, by agent id. */
-    idle: Map<string, () => void>;
+    /** How to settle an idle Spawn child and release its wait when input arrives. */
+    idle: Map<string, {
+        settle(aborted: boolean): void;
+        input(): void;
+    }>;
     /** The seed of each Spawn child being started, by its session id. */
     starting: Map<string, readonly SessionEvent[]>;
 }
@@ -37,9 +40,6 @@ export declare function spineSubagentProvider(starting: ReadonlyMap<string, read
  * never sees the parent done with an arrival still to come.
  */
 export declare function executeChild(world: SpineWorld, parent: Agent, birth: SpawnBirth, peers: readonly SpawnTask[], prefixEnd: number, signal: AbortSignal, arrive: (arrival: SpawnArrival) => void, started: () => void): Promise<SpawnArrival>;
-/**
- * After a restart no child runs. A child whose log ends it arrives as it
- * ended; every other open birth arrives aborted. None wakes the agent.
- */
-export declare function recoverChildren(world: SpineWorld, parent: Agent, births: readonly SpawnBirth[], children: SpawnChildren): Promise<void>;
+/** Read final results from each child's own log before reporting unfinished children as aborted. */
+export declare function recoverChildren(world: SpineWorld, parent: Agent, births: readonly SpawnBirth[], beforeRead: (id: SessionId) => Promise<void>): Promise<SpawnArrival[]>;
 //# sourceMappingURL=spawn.d.ts.map

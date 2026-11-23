@@ -1,7 +1,7 @@
 import { isAppendSurfaceEvent, pluginRecordOf } from "@deepseek-ai/dsh-session";
 import { createHostAdapter, isSpineToolName, operationFromSpineToolCall, spineToolRefusal, spineToolResult, unarrivedBirths, } from "@spinejit/spine-sdk/host";
 import { createNodeSpineRuntime } from "@spinejit/spine-sdk/node";
-import { anchorOf, logAnchors, USER_ANCHORS } from "./anchors.js";
+import { anchorPrefix, firstText, hasRepairedInlineAnchor, logAnchors, USER_ANCHORS } from "./anchors.js";
 import { arrivalOf, beginsSampling, emptySlot, endsSampling, eventMessage, isUserSource, samplingSlot, sourceCharacter, SpineDshError, spineText, surfaceRole, } from "./events.js";
 import { applySurfaceEdits, planItems, surfaceEdits } from "./projection.js";
 import { dropReasoning, hasReasoning } from "./reasoning.js";
@@ -62,8 +62,7 @@ export class SpineAgent {
     }
     static async create(agent, configToml, born, changed) {
         const events = agent.session.snapshotEvents();
-        // A forked session's inherited prefix is its parent's namespace.
-        const thread = inheritedCut(events) === undefined ? agent.id : agent.session.header.parentSession;
+        const { thread, continuations } = forkNamespaces(events, agent.id, agent.session.header.parentSession);
         const runtime = createNodeSpineRuntime({ thread, features: SPINE_FEATURES, configToml });
         const spine = new SpineAgent(agent, runtime.nodePrompt(), born, changed);
         spine.#adapter = await createHostAdapter({
@@ -85,7 +84,13 @@ export class SpineAgent {
             dispose: () => runtime.dispose(),
         });
         // A resumed session brings its log as seed events, which are never published.
-        await spine.#recover(events);
+        try {
+            await spine.#recover(events, continuations);
+        }
+        catch (error) {
+            spine.dispose();
+            throw error;
+        }
         return spine;
     }
     get projection() {
@@ -101,14 +106,8 @@ export class SpineAgent {
         this.#events.set(event.seq, event);
         if (isAppendSurfaceEvent(event) && surfaceRole(event) === "source")
             this.#unobserved.push(event);
-        if (isUserSource(event)) {
-            const number = this.#userNumbers.size + 1;
-            this.#userNumbers.set(event.seq, number);
-            if (anchorOf(eventMessage(event)) === number) {
-                this.#anchored.add(event.seq);
-                this.#anchorInText.add(event.seq);
-            }
-        }
+        if (isUserSource(event))
+            this.#userNumbers.set(event.seq, this.#userNumbers.size + 1);
         const record = pluginRecordOf(event);
         if (record?.type === USER_ANCHORS) {
             for (const { seq } of record.data.anchors)
@@ -171,7 +170,6 @@ export class SpineAgent {
     admit(name, args) {
         if (this.fault !== null)
             throw new SpineDshError("Spine context is faulted", { cause: this.fault });
-        operationFromSpineToolCall(name, args);
         const sampling = this.#sampling;
         if (sampling === null)
             throw new SpineDshError(`${name} ran outside a Spine sampling`);
@@ -181,8 +179,9 @@ export class SpineAgent {
         const refusal = spineToolRefusal(this.#projection, name, this.#entered, sessionBirth(this.agent.id), this.#responseCalls(sampling.from));
         if (refusal !== null)
             throw new SpineDshError(refusal);
+        const result = spineToolResult(this.#projection, name, args, this.#nodePrompt);
         sampling.called = name;
-        return spineToolResult(this.#projection, name, args, this.#nodePrompt);
+        return result;
     }
     /** Settle the open sampling, if any, over its stretch of the log so far. */
     async settle() {
@@ -198,20 +197,55 @@ export class SpineAgent {
      * or at the end of the log. A forked session continues in its own
      * namespace where its inherited prefix ends.
      */
-    async #recover(events) {
-        const cut = inheritedCut(events);
+    async #recover(events, continuations) {
+        const possibleLegacyAnchors = [];
         this.#recovering = true;
         for (const event of events) {
-            if (endsSampling(event) || event.seq === cut)
+            const sampling = beginsSampling(event);
+            if (sampling) {
+                // Older versions logged the anchor in the user text before sampling.
+                // Only recognize that format on replay, with a logged Spine sampling
+                // and no separate anchor record for that message.
+                for (const seq of possibleLegacyAnchors) {
+                    if (this.#anchored.has(seq))
+                        continue;
+                    this.#anchored.add(seq);
+                    this.#anchorInText.add(seq);
+                }
+                possibleLegacyAnchors.length = 0;
+            }
+            const nextThread = continuations.get(event.seq);
+            if (endsSampling(event) || nextThread !== undefined)
                 await this.#settle(event.seq);
-            if (event.seq === cut)
-                await this.#guard(() => this.#continueNamespace(event.seq));
+            if (nextThread !== undefined) {
+                possibleLegacyAnchors.length = 0;
+                await this.#guard(() => this.#continueNamespace(event.seq, nextThread));
+            }
             this.accept(event);
+            if (isUserSource(event)) {
+                const prefix = anchorPrefix(this.#userNumbers.get(event.seq));
+                if (firstText(eventMessage(event))?.startsWith(prefix))
+                    possibleLegacyAnchors.push(event.seq);
+            }
+            // Restored logs can contain an inline number even if Spine did not run
+            // for that reply. Require an earlier Spine anchor and a queued copy that
+            // proves the number was added to the message after the user sent it.
+            if (event.type === "assistant/message" && this.#anchored.size > 0) {
+                for (const seq of possibleLegacyAnchors) {
+                    if (this.#anchored.has(seq))
+                        continue;
+                    const user = this.#events.get(seq);
+                    if (user?.type === "user/message" && hasRepairedInlineAnchor(this.#events, seq, user.data, this.#userNumbers.get(seq))) {
+                        this.#anchored.add(seq);
+                        this.#anchorInText.add(seq);
+                    }
+                }
+            }
             // With Spine, a user message is numbered before the model answers it.
             if (event.type === "assistant/message" && [...this.#userNumbers.keys()].some((seq) => !this.#anchored.has(seq))) {
                 throw new SpineDshError(`session ${this.agent.id} started without Spine: its user messages carry no [U#]`);
             }
-            if (beginsSampling(event)) {
+            if (sampling) {
                 await this.#guard(async () => {
                     await this.#prepare();
                     await this.#begin(event.seq);
@@ -219,6 +253,9 @@ export class SpineAgent {
             }
         }
         await this.settle();
+        // Observe the entire recovery tail, including pending user sources, repaired
+        // inline anchors and DSH's synthetic Fork results, before applying the plan.
+        await this.#guard(() => this.#prepare());
         this.#recovering = false;
     }
     #project(projection) {
@@ -230,9 +267,9 @@ export class SpineAgent {
      * Observe the inherited sources and continue in this session's namespace.
      * Births the parent made stay its own to join.
      */
-    async #continueNamespace(cut) {
+    async #continueNamespace(cut, thread) {
         await this.#observe(cut);
-        const source = await this.#adapter.continueNamespace(this.agent.id);
+        const source = await this.#adapter.continueNamespace(thread);
         for (const cell of source.cells)
             this.#sourceSeqs.set(sourceKey(cell.source_id), cell.boundary);
         await this.#adapter.previewAndPublish();
@@ -268,6 +305,8 @@ export class SpineAgent {
                 await this.#adapter.stageExecution(call.callId, call.callId, operation);
                 await this.#adapter.finishExecution(call.callId, true);
             }
+            const stoppedSpawn = !this.#recovering && call?.name === "spine_spawn" && this.#userStopped(sampling.from, to);
+            const olderBirths = stoppedSpawn ? new Set(this.openBirths().map(({ producer }) => producer.join("."))) : null;
             await this.#observe(to);
             const outcome = this.#outcome(sampling.from, to);
             const result = await this.#adapter.finishSampling(outcome.terminal, outcome.inputTokens);
@@ -275,10 +314,27 @@ export class SpineAgent {
             if (result.type !== "committed")
                 return;
             this.#project(result.projection);
-            // The children a live Spawn bore start from the log before its sampling.
-            if (!this.#recovering && call?.name === "spine_spawn")
-                await this.#born(this.openBirths(), sampling.from);
+            if (!this.#recovering && call?.name === "spine_spawn") {
+                const births = this.openBirths().filter(({ producer }) => !olderBirths?.has(producer.join(".")));
+                await this.#born(births, sampling.from, stoppedSpawn);
+            }
         });
+    }
+    /** Stop is logged at turn/end, after the sampling's step/end. */
+    #userStopped(from, to) {
+        const start = this.#event(from);
+        if (start.type !== "developer/message")
+            return false;
+        const turn = start.data.turn;
+        for (let seq = to; seq < this.agent.session.seq; seq += 1) {
+            const event = this.#event(seq);
+            if (event.type === "turn/start")
+                return false;
+            if (event.type === "turn/end" && event.data.turn === turn) {
+                return event.data.reason.kind === "aborted" && event.data.reason.reason.kind === "user";
+            }
+        }
+        return false;
     }
     /** Observe the unobserved sources logged before `to`. */
     async #observe(to) {
@@ -336,13 +392,16 @@ export class SpineAgent {
                     throw new SpineDshError(`source ${item.seq} still shows its reasoning, which the Spine plan leaves out`);
                 }
             }
-            if (item.anchor === null)
+            if (item.anchor === null || !this.#anchored.has(item.seq))
                 continue;
-            const shown = this.agent.session.deriveEventMessage(this.#event(item.seq));
-            const numbered = shown === null ? null : anchorOf(shown);
-            const expected = this.#anchored.has(item.seq) ? item.anchor : null;
-            if (numbered !== expected) {
-                throw new SpineDshError(`source ${item.seq} is U${item.anchor} in the Spine plan; the model should see U${expected} but sees U${numbered}`);
+            const event = this.#event(item.seq);
+            const shown = this.agent.session.deriveEventMessage(event);
+            const rawText = firstText(eventMessage(event)) ?? "";
+            const prefix = anchorPrefix(item.anchor);
+            const legacy = this.#anchorInText.has(item.seq);
+            const expected = legacy ? rawText : prefix + rawText;
+            if ((legacy && !rawText.startsWith(prefix)) || shown === null || firstText(shown) !== expected) {
+                throw new SpineDshError(`source ${item.seq} does not show the expected user text for U${item.anchor}`);
             }
         }
     }
@@ -378,8 +437,12 @@ export class SpineAgent {
             if (event.type !== "assistant/message")
                 continue;
             const terminal = event.data.interrupted === true ? "cancelled" : "completed";
-            const inputTokens = event.data.usage?.inputTokens;
-            return inputTokens === undefined ? { terminal } : { terminal, inputTokens };
+            const usage = event.data.usage;
+            if (usage === undefined)
+                return { terminal };
+            // DSH reports uncached, cache-read, and cache-write input separately.
+            const inputTokens = usage.inputTokens + (usage.cacheReadTokens ?? 0) + (usage.cacheWriteTokens ?? 0);
+            return { terminal, inputTokens };
         }
         return { terminal: "failed" };
     }
@@ -395,14 +458,21 @@ export class SpineAgent {
         }
     }
 }
-/** Where a forked session's inherited prefix ends: its last inherited seed marker. */
-function inheritedCut(events) {
+/** Replay each inherited prefix before continuing in the namespace after its cut. */
+function forkNamespaces(events, sessionId, parentSession) {
+    const continuations = new Map();
+    let thread = sessionId;
     for (let index = events.length - 1; index >= 0; index -= 1) {
         const event = events[index];
-        if (event.type === "session/end-seed" && event.data.inherited === true)
-            return event.seq;
+        if (event.type !== "session/end-seed" || event.data.inherited !== true)
+            continue;
+        const parent = continuations.size === 0 ? parentSession : undefined;
+        continuations.set(event.seq, thread);
+        // Ordinary Fork does not record the source session ID. A stable namespace
+        // per copied segment keeps its pending Spawn work owned by that segment.
+        thread = parent ?? `dsh-inherited:${event.seq}`;
     }
-    return undefined;
+    return { thread, continuations };
 }
 function sourceKey(id) {
     return `${id.thread}\u0000${id.epoch}\u0000${id.ordinal}`;
