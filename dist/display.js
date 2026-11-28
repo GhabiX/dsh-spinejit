@@ -37,7 +37,8 @@ export const treeProjection = {
         const tree = treeSchema.safeParse(record.data);
         return tree.success ? tree.data : state;
     },
-    wire: { viewSchema: stateSchema, view: (state) => state },
+    // The whole tree is heavy: clients read it from the session view, never from session/list summaries.
+    wire: { summary: false, viewSchema: stateSchema, view: (state) => state },
 };
 /**
  * Each agent's tree, and the one the terminal shows: the top-level session

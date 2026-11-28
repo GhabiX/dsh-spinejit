@@ -1,7 +1,9 @@
+import type { Message } from "@deepseek-ai/dsh-llm";
 import type { Agent } from "@deepseek-ai/dsh-agent";
-import { type SessionEvent } from "@deepseek-ai/dsh-session";
+import { SessionSeq, type SessionEvent } from "@deepseek-ai/dsh-session";
 import type { FeatureFlag, SpineProjection } from "@spinejit/spine-sdk";
 import { type SpawnBirth, type SpineToolName } from "@spinejit/spine-sdk/host";
+import { SpineDshError, type CompactSummary } from "./events.js";
 export declare const SPINE_FEATURES: FeatureFlag[];
 /**
  * Hands over the births a live commit made and where their sampling began in
@@ -18,6 +20,37 @@ export type ProjectionHandler = (projection: SpineProjection) => void;
 export declare class SpineToolLimitError extends Error {
     constructor(staged: SpineToolName);
 }
+/** The checkpoint is durable, but the live Spine state could not follow it. */
+export declare class SpineCompactCommitError extends SpineDshError {
+}
+/** Compaction cannot run now (parallel branches are still out); nothing changed. */
+export declare class SpineCompactBusyError extends SpineDshError {
+}
+export interface SpineCompactOptions {
+    /** manual: idle `/compact`; auto: provider-confirmed overflow inside a turn. */
+    readonly mode: "manual" | "auto";
+    readonly summarize: (messages: readonly Message[]) => Promise<CompactSummary>;
+    /** Make the checkpoint durable before Spine changes epochs. */
+    readonly flush: () => Promise<void>;
+    readonly signal: AbortSignal;
+}
+export interface SpineCompactResult {
+    /** The compaction/prune record that prices the shadowed node. */
+    readonly pruneSeq: SessionSeq;
+    /** The checkpoint user message that carries the barrier. */
+    readonly seq: SessionSeq;
+    readonly shadowedSeq: SessionSeq;
+    readonly shadowedTokenCount: number;
+    readonly summary: string;
+}
+/** How the compaction engine reaches the Spine state of an agent. */
+export interface SpineAttachment {
+    ensure(agent: Agent): Promise<SpineAgent>;
+    readonly signal: AbortSignal;
+}
+/** The live plugin publishes its attachment; the returned disposer withdraws it. */
+export declare function provideSpineAttachment(value: SpineAttachment): () => void;
+export declare function spineAttachment(): SpineAttachment | undefined;
 /**
  * The Spine state of one DSH agent. One main-loop model request is one Spine
  * sampling: it begins with a marked empty slot in front of the response, and
@@ -53,6 +86,13 @@ export declare class SpineAgent {
     admit(name: SpineToolName, args: Record<string, unknown>): string;
     /** Settle the open sampling, if any, over its stretch of the log so far. */
     settle(): Promise<void>;
+    /**
+     * Replace the live context with one durable checkpoint and move Spine to a
+     * new epoch behind it. Manual compaction runs under DSH's idle maintenance
+     * lock; automatic compaction runs between a failed request and its retry,
+     * where the next request re-enters the step and applies the new plan.
+     */
+    compact(options: SpineCompactOptions): Promise<SpineCompactResult | null>;
     dispose(): void;
 }
 //# sourceMappingURL=agent.d.ts.map
