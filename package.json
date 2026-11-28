@@ -102,7 +102,7 @@
     "@deepseek-ai/dsh-token-meter": "0.2.2-rc.5",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
     "esbuild": "0.28.2",
-    "@types/node": "22.10.2",
+    "@types/node": "26.6.6",
     "typescript": "5.9.2"
   }
 }
