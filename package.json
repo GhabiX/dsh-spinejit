@@ -103,6 +103,6 @@
     "@deepseek-ai/dsh-tools": "0.2.2-rc.5",
     "esbuild": "0.28.2",
     "@types/node": "22.10.2",
-    "typescript": "5.9.2"
+    "typescript": "7.0.2"
   }
 }
